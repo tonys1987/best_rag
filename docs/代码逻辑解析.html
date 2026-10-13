@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>企业知识库 RAG 问答系统 · 代码逻辑解析</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --ink: #1f2937; --sub: #6b7280; --line: #e5e7eb;
+    --blue: #2563eb; --blue-bg: #eff6ff; --green: #059669; --green-bg: #ecfdf5;
+    --amber: #b45309; --amber-bg: #fffbeb; --code-bg: #f6f8fa;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: var(--ink);
+         max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; line-height: 1.75; background: #fff; }
+  h1 { font-size: 26px; border-bottom: 3px solid var(--blue); padding-bottom: 10px; }
+  h2 { font-size: 20px; margin-top: 48px; padding-left: 10px; border-left: 5px solid var(--blue); }
+  h3 { font-size: 16px; margin-top: 28px; color: var(--blue); }
+  .meta { color: var(--sub); font-size: 14px; margin-top: -6px; }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; font-size: 13.5px;
+         font-family: Consolas, "Courier New", monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+        padding: 12px 16px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+  pre code { background: none; padding: 0; }
+  .tip { border-radius: 8px; padding: 10px 16px; margin: 14px 0; font-size: 14.5px; }
+  .tip.blue  { background: var(--blue-bg);  border-left: 4px solid var(--blue); }
+  .tip.green { background: var(--green-bg); border-left: 4px solid var(--green); }
+  .tip.amber { background: var(--amber-bg); border-left: 4px solid var(--amber); }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }
+  th { background: #f9fafb; }
+  .mermaid { background: #fcfcfd; border: 1px solid var(--line); border-radius: 10px;
+             padding: 18px; margin: 16px 0; text-align: center; }
+  .filetag { display: inline-block; background: #eef2ff; color: #4338ca; border-radius: 4px;
+             padding: 0 8px; font-size: 12.5px; font-family: Consolas, monospace; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<h1>企业知识库 RAG 问答系统 · 代码逻辑解析</h1>
+<p class="meta">对应代码：app_enterprise.py ｜ src/（parsers, chunker, doc_store, enterprise_qa）｜ LLMClient.py ｜ 更新日期：2026-10-11</p>
+
+<h2>1. 系统一句话概括</h2>
+<p>把企业里各种格式的文档（pdf / doc / docx / txt / md / json / xlsx / xls / csv）上传入库，
+系统自动<strong>解析 → 结构感知分块 → 向量化 → 建索引</strong>；提问时<strong>全库检索 → LLM 重排 → 结构化问答</strong>，
+答案必须附带可溯源的<strong>文件名 + 行号</strong>引用，资料不足时明确拒答。</p>
+<div class="tip blue">
+旧的比赛年报问答管道（app_streamlit.py / pipeline 等）已于 2026-10-10 清理归档，当前仓库只剩企业问答这一条链路，
+两套系统互不影响。
+</div>
+
+<h2>2. 模块地图与调用关系</h2>
+<div class="mermaid">
+flowchart TB
+    UI["app_enterprise.py<br/>Streamlit 界面<br/>文档管理 + 查询问答"]
+    DS["src/doc_store.py<br/>SQLite 登记表<br/>单文件入库/重建/删除"]
+    QA["src/enterprise_qa.py<br/>全库检索 + 融合重排<br/>结构化问答"]
+    CH["src/chunker.py<br/>结构感知分块"]
+    PA["src/parsers/<br/>多格式解析器"]
+    LC["LLMClient.py<br/>统一模型网关"]
+    API["DashScope 兼容接口<br/>(.env 配置)"]
+    DB[("data/enterprise_db/<br/>registry.db + chunked_reports + vector_dbs")]
+
+    UI -->|"上传/重建/删除"| DS
+    UI -->|"搜索 / 生成答案"| QA
+    DS -->|"parse_file"| PA
+    DS -->|"chunk_markdown"| CH
+    DS -->|"embed_texts / 读写索引"| DB
+    QA -->|"list_documents + 读库"| DS
+    QA -->|"embed_query / rerank_texts / chat_structured"| LC
+    DS -->|"embed_texts"| LC
+    LC --> API
+</div>
+<p>分层的要点：<strong>UI 不直接碰模型</strong>；<strong>doc_store 只管「一个文件的生命周期」</strong>；
+<strong>enterprise_qa 只管「跨文件检索问答」</strong>；所有模型调用收敛到 LLMClient 一个出口。</p>
+
+<h2>3. 磁盘数据布局</h2>
+<div class="mermaid">
+flowchart LR
+    subgraph ED["data/enterprise_db/"]
+      R[("registry.db<br/>SQLite 登记表")]
+      C["chunked_reports/{doc_id}.json<br/>分块结果"]
+      V["vector_dbs/{doc_id}.faiss<br/>向量索引"]
+    end
+    U["data/uploads/<br/>UI 上传文件落地处"]
+    U -->|"ingest_file"| R & C & V
+    R --- C
+    R --- V
+</div>
+<p>登记表 <code>documents</code> 表字段：<code>doc_id</code>（主键）、file_path、file_name、file_type、title、
+file_hash、status（pending/ready/failed）、chunk_count、error、created_at、updated_at。</p>
+
+<h2>4. 入库流水线（doc_store.ingest_file）</h2>
+<div class="mermaid">
+flowchart TD
+    A["收到文件路径"] --> B["计算内容 sha1 = doc_id"]
+    B --> C{"登记表里已有<br/>同 doc_id 且 ready?"}
+    C -->|"是"| D["幂等跳过<br/>不重复入库"]
+    C -->|"否"| E{"同路径存在旧版本?"}
+    E -->|"是"| F["删旧 doc_id 的 json/faiss + 登记行"]
+    E -->|"否"| G["parse_file 解析成 markdown"]
+    F --> G
+    G --> H["chunk_markdown 结构感知分块"]
+    H --> I{"分块为空?"}
+    I -->|"是"| X1["登记 status=failed + error<br/>抛异常"]
+    I -->|"否"| J["embed_texts 批量向量化(25/批)"]
+    J --> K["建 faiss IndexFlatIP<br/>写入临时目录再搬到 vector_dbs"]
+    K --> L["写 chunked json + 登记 ready<br/>返回登记行"]
+</div>
+<div class="tip green">
+<strong>核心设计：doc_id = 文件内容 sha1。</strong>同内容重复入库自动跳过（幂等）；
+文件内容一变，hash 就变，重新入库会自动清掉旧版本产物——<strong>单文件换代，不用全量重跑</strong>。
+</div>
+<div class="tip amber">
+<strong>Windows 中文路径兜底：</strong>faiss 库对含中文的路径写盘可能失败，所以先写到系统临时目录再
+<code>shutil.move</code> 到目标位置；读取侧同样有临时目录兜底。
+</div>
+
+<h2>5. 结构感知分块（chunker.chunk_markdown）</h2>
+<p>旧的按 30 行盲切会把表格拦腰斩断、上下文丢失。新分块器按 <strong>markdown 标题层级</strong>先切节，
+节内再区分<strong>表格段</strong>与<strong>文本段</strong>：</p>
+<div class="mermaid">
+flowchart TD
+    A["markdown 全文按行扫描"] --> B["遇标题(#~######)切节<br/>维护章节路径 headings"]
+    B --> C["节内划分连续段<br/>表格行 |...| 为一段，普通文本为一段"]
+    C --> D{"表格段?"}
+    D -->|"是, 且整体不超限"| E["整表独立成块(原子)"]
+    D -->|"是, 超限"| F["按行分组切分<br/>每组重复表头行"]
+    D -->|"否"| G["文本缓冲累积"]
+    G --> H{"空行且已达 50% 上限?"}
+    H -->|"是"| I["在段落边界落块(优先断点)"]
+    H -->|"否"| J{"加该行会超限?"}
+    J -->|"是"| I
+    J -->|"否"| K["继续累积"]
+    I & K --> L["每块加前缀:<br/>【文档标题 › 章节 › 子章节】"]
+</div>
+<p>块结构：<code>{"page": 起始行, "lines": [start, end], "text": ...}</code>，行号是<strong>原文绝对行号</strong>，
+这就是最终答案能溯源到「某文件第几行」的根基。块前缀让每个块被单独检索出来时也自带章节上下文。</p>
+<div class="tip blue">
+<strong>token 计数用本地近似</strong>（CJK 1 字 ≈ 1 token，其他 3.5 字符 ≈ 1 token），
+刻意不用 tiktoken——它首次运行要连外网下载编码表，国内环境容易卡死，而分块只需量级准确。
+</div>
+
+<h2>6. 检索与问答（enterprise_qa）</h2>
+<h3>6.1 检索 retrieve()：全库召回 → 真实重排 → 加权融合</h3>
+<div class="mermaid">
+flowchart TD
+    Q["用户问题"] --> E["embed_query 生成查询向量<br/>(L2 归一化)"]
+    E --> F["遍历所有 ready 文档的 faiss 库<br/>每库取 Top-N 候选"]
+    F --> O["合并候选(可按 file_type/doc_id 过滤)"]
+    O --> RR["gte-rerank-v2 真实相关性打分"]
+    RR --> MIX["融合分 = 0.7 x 重排分 + 0.3 x 向量余弦"]
+    MIX --> S["按融合分降序取 Top-K<br/>附 文件名/类型/行号/三路分数"]
+</div>
+<h3>6.2 端到端问答 ask()：时序</h3>
+<div class="mermaid">
+sequenceDiagram
+    participant U as 用户(UI)
+    participant QA as EnterpriseQA
+    participant LC as LLMClient
+    participant DS as DashScope
+    U->>QA: ask(question)
+    QA->>LC: embed_query(question)
+    LC->>DS: embedding 接口
+    DS-->>LC: 1536 维向量
+    QA->>QA: 全库检索 + 重排融合取 Top-K
+    QA->>QA: 拼上下文: 每段标注 [来源i] 文件名(类型, 行号)
+    QA->>LC: chat_structured(QAAnswer schema)
+    LC->>DS: qwen 结构化问答(失败则降级 json_mode+json_repair)
+    DS-->>LC: step_by_step / reasoning_summary / final_answer / used_sources
+    LC-->>QA: dict
+    QA->>QA: used_sources 编号回填成真实文件名+行号
+    QA-->>U: 答案 + 引用来源 + 耗时
+</div>
+<div class="tip green">
+<strong>防编造约束：</strong>system prompt 明确要求「严格根据检索资料回答，不要编造资料之外的数字和事实，
+资料不足时明确说『资料中未提及』」。验收中无资料问题正确触发了拒答。
+</div>
+
+<h2>7. 统一模型网关（LLMClient）</h2>
+<table>
+<tr><th>能力</th><th>函数</th><th>实现要点</th></tr>
+<tr><td>对话</td><td><code>chat()</code></td><td>ChatOpenAI(qwen3.7-max)，temperature=0.1，记录 token 用量</td></tr>
+<tr><td>结构化输出</td><td><code>chat_structured(schema)</code></td><td>优先 function calling；失败自动降级 json_mode + json_repair 修复</td></tr>
+<tr><td>查询向量</td><td><code>embed_query()</code></td><td>单条，L2 归一化（IndexFlatIP 内积即余弦），失败重试 3 次</td></tr>
+<tr><td>文档向量</td><td><code>embed_texts()</code></td><td>批量 25 条/批（v1 上限），过滤空串 + 归一化</td></tr>
+<tr><td>重排</td><td><code>rerank_texts()</code></td><td>裸调 dashscope.TextReRank（不经过 langchain 封装——封装层吞错）</td></tr>
+</table>
+<div class="tip amber">
+<strong>模型版本钉死：</strong>embedding 固定 text-embedding-v1（1536 维，不支持 dimensions 参数）。
+查询侧与入库侧走的是 LangChain 不同的参数路径，v3 不显式钉死维度时两侧维度会不一致（1024 vs 1536）——
+这是踩过的真实坑。今后换 v3 必须<strong>全量重建</strong>向量库。
+</div>
+
+<h2>8. Streamlit UI（app_enterprise.py）</h2>
+<div class="mermaid">
+flowchart LR
+    subgraph SB["左侧栏"]
+      DM["文档管理<br/>上传多文件→批量入库<br/>清单/重建/删除"]
+      QS["查询设置<br/>问题/类型过滤/Top-K/重排开关<br/>搜索文档 | 生成答案"]
+    end
+    subgraph MAIN["右侧主区"]
+      HR["检索结果卡片<br/>文件+行号+三路分数"]
+      AN["问答结果<br/>分步推理/推理摘要/引用来源/最终答案"]
+    end
+    DM -->|"操作后 refresh()"| QA2["EnterpriseQA<br/>st.cache_resource 缓存"]
+    QS --> HR & AN
+</div>
+<p>问答后端用 <code>@st.cache_resource</code> 缓存 EnterpriseQA 单例（懒加载全部向量库）；
+文档增删改后调 <code>refresh_qa()</code> 强制刷新缓存，保证 UI 与磁盘状态一致。</p>
+
+<h2>9. 关键设计决策速查</h2>
+<table>
+<tr><th>决策</th><th>理由</th></tr>
+<tr><td>doc_id = 内容 sha1</td><td>幂等入库 + 文件更新自动换代，单文件维度管理</td></tr>
+<tr><td>每文档独立 faiss 文件</td><td>单文件增删重建互不影响，无需全库重索引</td></tr>
+<tr><td>结构感知分块 + 表格原子化</td><td>表格数值问答精确的关键；超长表按行分组并重复表头</td></tr>
+<tr><td>块带章节路径前缀</td><td>孤立块检索时保留上下文，提升召回相关性</td></tr>
+<tr><td>向量分与重排分 0.7/0.3 加权融合</td><td>重排分数语义更准为主，向量分兜底防重排异常</td></tr>
+<tr><td>结构化输出双通道</td><td>function calling 失败自动降级 json_mode + json_repair，提高可用性</td></tr>
+<tr><td>绝对行号贯穿全链</td><td>解析→分块→检索→引用，答案可溯源到原文行</td></tr>
+<tr><td>解析器统一 ParseResult</td><td>所有格式收敛为 markdown + meta，分块层零感知格式差异</td></tr>
+</table>
+
+<h2>10. 本地运行</h2>
+<pre><code># 启动 UI（项目根目录）
+venv\Scripts\python.exe -m streamlit run app_enterprise.py --server.port 8502
+
+# 验收脚本（真实调用 LLM）
+venv\Scripts\python.exe _test_parsers.py    # 解析器
+venv\Scripts\python.exe _test_docstore.py   # 登记表+入库
+venv\Scripts\python.exe _test_qa.py         # 检索问答
+venv\Scripts\python.exe _test_ui.py         # UI AppTest</code></pre>
+<p class="meta">本文档由代码实读整理生成；Mermaid 图需联网加载渲染库。</p>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", flowchart: { curve: "basis" } });
+</script>
+</body>
+</html>
