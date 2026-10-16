@@ -163,7 +163,8 @@ if search_btn and question.strip():
     t0 = time.time()
     with st.spinner("检索中..."):
         try:
-            hits = qa.retrieve(question, top_k=top_k, file_type=file_type_arg)
+            hits = qa.retrieve(question, top_k=top_k, file_type=file_type_arg,
+                               use_rerank=use_rerank)
         except ValueError as e:
             st.warning(str(e))
             hits = []
@@ -178,7 +179,8 @@ elif search_btn:
 if answer_btn and question.strip():
     with st.spinner("检索 + 重排 + LLM 问答中，请稍候..."):
         try:
-            ans = qa.ask(question, top_k=top_k, file_type=file_type_arg)
+            ans = qa.ask(question, top_k=top_k, file_type=file_type_arg,
+                         use_rerank=use_rerank)
         except ValueError as e:
             st.warning(str(e))
             ans = None

@@ -97,9 +97,11 @@ class EnterpriseQA:
     # ---------- 检索 ----------
 
     def retrieve(self, query: str, top_k: Optional[int] = None,
-                 file_type: Optional[str] = None, doc_id: Optional[str] = None) -> List[dict]:
+                 file_type: Optional[str] = None, doc_id: Optional[str] = None,
+                 use_rerank: Optional[bool] = None) -> List[dict]:
         """全库检索：逐库 Top-N -> 合并 -> (可选)重排融合 -> Top-K。
 
+        use_rerank 为 None 时跟随构造时的 self.rerank，否则以调用方为准。
         返回块列表，附 doc/file/type/lines/vector_score/rerank_score。
         """
         from LLMClient import embed_query, rerank_texts
@@ -107,6 +109,7 @@ class EnterpriseQA:
         if not query.strip():
             raise ValueError("检索词不能为空")
         top_k = top_k or self.top_k
+        do_rerank = self.rerank if use_rerank is None else use_rerank
         want_type = file_type.lower() if file_type else None
 
         candidates = []
@@ -145,7 +148,7 @@ class EnterpriseQA:
             return []
 
         # 重排：gte-rerank-v2 真实相关性分数，与向量余弦加权融合
-        if self.rerank and len(candidates) > 1:
+        if do_rerank and len(candidates) > 1:
             texts = [c["text"] for c in candidates]
             ranked = rerank_texts(query, texts, top_n=len(texts))
             rerank_score_by_idx = {r["index"]: r["relevance_score"] for r in ranked}
@@ -175,12 +178,14 @@ class EnterpriseQA:
         return "\n\n---\n\n".join(parts)
 
     def ask(self, question: str, top_k: Optional[int] = None,
-            file_type: Optional[str] = None, verbose: bool = True) -> dict:
+            file_type: Optional[str] = None, verbose: bool = True,
+            use_rerank: Optional[bool] = None) -> dict:
         """端到端问答：检索 -> 拼上下文 -> LLM 结构化输出 -> 来源回填。"""
         from LLMClient import chat_structured, last_usage
 
         t0 = time.time()
-        hits = self.retrieve(question, top_k=top_k, file_type=file_type)
+        hits = self.retrieve(question, top_k=top_k, file_type=file_type,
+                             use_rerank=use_rerank)
         if not hits:
             return {
                 "question": question, "final_answer": "资料中未提及。",
