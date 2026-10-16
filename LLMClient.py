@@ -1,13 +1,15 @@
 """统一模型网关：项目内所有 LLM / Embedding / 重排调用都从这里走。
 
 配置全部来自项目根目录 .env：
-  api_base_url  OpenAI 兼容接口地址（当前指向 DashScope 兼容模式）
-  api_key       对应密钥
-  model         问答用大模型名（如 qwen3.7-max）
+  api_base_url      OpenAI 兼容接口地址（chat / embedding 走这里，当前指向 agicto）
+  api_key           主网关密钥
+  model             问答用大模型名（如 deepseek-v4.1-flash）
+  dashscope_api_key 重排专用（gte-rerank-v2 为 DashScope 原生模型，兼容网关代理不了；
+                    未配置时回退 api_key）
 
 embedding 固定 text-embedding-v1（1536 维，与既有向量库兼容；换 v3/更高版需全量重建向量库），
-重排固定 gte-rerank-v2（均为 DashScope 模型）。
-若未来要切内网私有网关，只需改 .env 的 api_base_url，代码零改动。
+重排固定 gte-rerank-v2（DashScope 原生）。
+主网关可随时通过 .env 的 api_base_url 整体切换，代码零改动。
 """
 import os
 import sys
@@ -28,7 +30,9 @@ try:  # Windows 控制台 GBK 兜底，失败不影响主流程
 except Exception:
     pass
 
-load_dotenv()
+# override=True：项目 .env 优先于系统环境变量（机器上残留过旧的用户级 api_base_url，
+# 会把请求打到错误网关，这里强制以 .env 为准）
+load_dotenv(override=True)
 model = os.getenv("model")
 key = os.getenv("api_key")
 url = os.getenv("api_base_url")
@@ -175,7 +179,9 @@ def rerank_texts(query: str, texts: List[str], top_n: Optional[int] = None) -> L
     if not texts:
         return []
     import dashscope
-    dashscope.api_key = key
+    # gte-rerank-v2 是 DashScope 原生模型：主网关切到兼容代理（如 agicto）时，
+    # 重排仍需 DashScope key，由 .env 的 dashscope_api_key 单独提供
+    dashscope.api_key = os.getenv("dashscope_api_key") or key
     from dashscope import TextReRank
     resp = TextReRank.call(
         model=RERANK_MODEL,

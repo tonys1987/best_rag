@@ -102,6 +102,15 @@ def parse_pdf(path: Path, output_dir: Path, method: str = "auto") -> ParseResult
     md_path = output_dir / md_name
 
     md_text = md_path.read_text(encoding="utf-8")
+
+    # 图片内容 OCR 回填：图片里的表格/文字转为可检索文本（失败不阻断入库）
+    ocr_count = 0
+    try:
+        from src.parsers.ocr_images import augment_markdown
+        md_text, ocr_count = augment_markdown(md_text, local_image_dir)
+    except ImportError:
+        print("[pdf_parser] rapidocr_onnxruntime 未安装，跳过图片 OCR")
+
     return ParseResult(
         markdown=md_text,
         meta={
@@ -110,6 +119,7 @@ def parse_pdf(path: Path, output_dir: Path, method: str = "auto") -> ParseResult
             "device": detect_device(),
             "parse_method": "ocr" if use_ocr else "txt",
             "md_path": str(md_path),
+            "ocr_images": ocr_count,
         },
         source_path=str(path),
     )

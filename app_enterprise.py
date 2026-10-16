@@ -171,13 +171,13 @@ if search_btn and question.strip():
     if not hits:
         st.info("没有检索到相关内容。")
     else:
-        st.caption(f"检索 {len(hits)} 块，耗时 {time.time() - t0:.2f}s（不含重排已在 retrieve 内）")
+        st.caption(f"检索 {len(hits)} 块，耗时 {time.time() - t0:.2f}s" + ("（含 LLM 重排）" if use_rerank else "（未启用重排，按向量相似度排序）"))
         render_hits(hits)
 elif search_btn:
     st.warning("请先输入问题")
 
 if answer_btn and question.strip():
-    with st.spinner("检索 + 重排 + LLM 问答中，请稍候..."):
+    with st.spinner("检索 + LLM 问答中，请稍候..." if not use_rerank else "检索 + 重排 + LLM 问答中，请稍候..."):
         try:
             ans = qa.ask(question, top_k=top_k, file_type=file_type_arg,
                          use_rerank=use_rerank)
