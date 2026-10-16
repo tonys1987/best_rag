@@ -18,7 +18,13 @@ import streamlit as st
 from src import doc_store
 from src.enterprise_qa import EnterpriseQA
 
-st.set_page_config(page_title="企业知识库问答", page_icon="📚", layout="wide")
+st.set_page_config(page_title="BEST_RAG", page_icon="📚", layout="wide")
+
+# 收紧侧栏留白，避免出现上下滚动条
+st.markdown("""<style>
+[data-testid="stSidebar"] .block-container {padding-top: 0.8rem; padding-bottom: 0.8rem;}
+[data-testid="stSidebar"] [data-testid="stExpander"] {border: none;}
+</style>""", unsafe_allow_html=True)
 
 # ---------------- 缓存后端 ----------------
 
@@ -36,7 +42,7 @@ def refresh_qa():
 
 st.markdown("""
 <div style='background: linear-gradient(90deg, #4b6cb7 0%, #182848 100%); padding: 20px 0; border-radius: 12px; text-align: center;'>
-    <h2 style='color: white; margin: 0;'>📚 企业知识库问答</h2>
+    <h2 style='color: white; margin: 0;'>📚 BEST_RAG · 企业知识库问答</h2>
     <div style='color: #dfe6f3; font-size: 15px;'>
         多格式文档入库 | 结构感知分块 | 向量检索 + gte-rerank 重排 + qwen 结构化问答 | 来源可溯源
     </div>
@@ -46,66 +52,63 @@ st.markdown("""
 # ---------------- 左侧栏 ----------------
 
 with st.sidebar:
-    # ---- 文档管理 ----
-    st.header("🗂 文档管理")
-
-    uploads = st.file_uploader(
-        "上传文档（pdf/doc/docx/txt/md/json/xlsx/xls/csv）",
-        accept_multiple_files=True,
-        type=["pdf", "doc", "docx", "txt", "md", "markdown", "json", "xlsx", "xls", "csv"],
-    )
-    if uploads and st.button("📥 入库所选文件", use_container_width=True):
-        save_dir = Path("data/uploads")
-        save_dir.mkdir(parents=True, exist_ok=True)
-        ok, fail = 0, 0
-        prog = st.progress(0.0)
-        for i, up in enumerate(uploads):
-            dest = save_dir / up.name
-            dest.write_bytes(up.getvalue())
-            try:
-                doc_store.ingest_file(dest)
-                ok += 1
-            except Exception as e:
-                st.warning(f"入库失败 {up.name}: {e}")
-                fail += 1
-            prog.progress((i + 1) / len(uploads))
-        prog.empty()
-        st.success(f"入库完成：成功 {ok}，失败 {fail}")
-        refresh_qa()
-
     docs = doc_store.list_documents()
-    with st.expander(f"📚 文档清单（{len(docs)} 条，ready {sum(1 for d in docs if d['status']=='ready')}）"):
-        for d in docs:
-            icon = {"ready": "✅", "failed": "❌", "pending": "⏳"}.get(d["status"], "•")
-            st.markdown(
-                f"{icon} **{d['file_name']}**（{d['file_type']}，{d['chunk_count']} 块）"
-                + (f"  \n⚠️ {d['error'][:60]}" if d["error"] else "")
-            )
 
-    if docs:
-        target = st.selectbox(
-            "选择文档进行维护",
-            docs,
-            format_func=lambda d: f"{d['file_name']} [{d['status']}]",
+    # ---- 文档管理（收进折叠面板，默认收起，避免侧栏溢出滚动条）----
+    with st.expander("🗂 文档管理（上传 / 清单 / 维护）"):
+        uploads = st.file_uploader(
+            "上传文档（pdf/doc/docx/txt/md/json/xlsx/xls/csv）",
+            accept_multiple_files=True,
+            type=["pdf", "doc", "docx", "txt", "md", "markdown", "json", "xlsx", "xls", "csv"],
         )
-        c1, c2 = st.columns(2)
-        if c1.button("🔄 重建", use_container_width=True):
-            try:
-                doc_store.rebuild_file(target["doc_id"])
-                st.success("重建完成")
-                refresh_qa()
-            except Exception as e:
-                st.error(f"重建失败: {e}")
-        if c2.button("🗑 删除", use_container_width=True):
-            doc_store.delete_file(target["doc_id"])
-            st.success("已删除")
+        if uploads and st.button("📥 入库所选文件", use_container_width=True):
+            save_dir = Path("data/uploads")
+            save_dir.mkdir(parents=True, exist_ok=True)
+            ok, fail = 0, 0
+            prog = st.progress(0.0)
+            for i, up in enumerate(uploads):
+                dest = save_dir / up.name
+                dest.write_bytes(up.getvalue())
+                try:
+                    doc_store.ingest_file(dest)
+                    ok += 1
+                except Exception as e:
+                    st.warning(f"入库失败 {up.name}: {e}")
+                    fail += 1
+                prog.progress((i + 1) / len(uploads))
+            prog.empty()
+            st.success(f"入库完成：成功 {ok}，失败 {fail}")
             refresh_qa()
 
-    st.divider()
+        with st.expander(f"📚 文档清单（{len(docs)} 条，ready {sum(1 for d in docs if d['status']=='ready')}）"):
+            for d in docs:
+                icon = {"ready": "✅", "failed": "❌", "pending": "⏳"}.get(d["status"], "•")
+                st.markdown(
+                    f"{icon} **{d['file_name']}**（{d['file_type']}，{d['chunk_count']} 块）"
+                    + (f"  \n⚠️ {d['error'][:60]}" if d["error"] else "")
+                )
+
+        if docs:
+            target = st.selectbox(
+                "选择文档进行维护",
+                docs,
+                format_func=lambda d: f"{d['file_name']} [{d['status']}]",
+            )
+            c1, c2 = st.columns(2)
+            if c1.button("🔄 重建", use_container_width=True):
+                try:
+                    doc_store.rebuild_file(target["doc_id"])
+                    st.success("重建完成")
+                    refresh_qa()
+                except Exception as e:
+                    st.error(f"重建失败: {e}")
+            if c2.button("🗑 删除", use_container_width=True):
+                doc_store.delete_file(target["doc_id"])
+                st.success("已删除")
+                refresh_qa()
 
     # ---- 查询设置 ----
-    st.header("🔍 查询设置")
-    question = st.text_area("输入问题", height=90, placeholder="例如：公司成立于哪一年？")
+    question = st.text_area("输入问题", height=70, placeholder="例如：公司成立于哪一年？")
 
     # 固定展示全部支持格式，避免"没看到的类型以为不支持"；选无文档的类型时检索结果为空
     ready_types = sorted({d["file_type"] for d in docs if d["status"] == "ready"})
