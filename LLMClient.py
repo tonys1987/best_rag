@@ -67,6 +67,16 @@ embeddings = OpenAIEmbeddings(
 # 最近一次调用的 token 用量（结构化调用会丢失 usage，这里兜底记录）
 last_usage: Dict = {}
 
+# 原生结构化输出能力缓存：(base_url, model) -> True/False/未探测(None)。
+# False 表示该网关明确不支持 response_format/tool calling，后续直接走 json_mode 降级
+_structured_native_ok: Dict[tuple, bool] = {}
+
+
+def _is_unsupported_error(e: Exception) -> bool:
+    """识别「网关不支持结构化输出」类错误（区别于网络抖动等瞬时错误）。"""
+    msg = str(e).lower()
+    return "response_format" in msg or "unavailable now" in msg
+
 
 def _normalize(vec: List[float]) -> List[float]:
     """L2 归一化：FAISS IndexFlatIP 内积即余弦相似度，分数越高越相关。"""
@@ -126,26 +136,39 @@ def chat_structured(
 ) -> Dict:
     """结构化输出：优先 function calling，失败回退 json_mode + json_repair。
 
+    原生能力按 (网关, 模型) 探测一次并缓存：网关明确返回「response_format 不支持」类错误后，
+    后续调用直接走降级路径，不再每次白撞一次失败请求。换网关/模型会自动重新探测。
     返回 schema 校验后的 dict。
     """
     global last_usage
-    # 第一次尝试：原生结构化（DashScope 兼容模式对 qwen 系支持 tool calling）
-    try:
-        structured_llm = llm.bind(temperature=temperature).with_structured_output(schema)
-        result = structured_llm.invoke(
-            [
-                ("system", system_content),
-                ("human", human_content),
-            ]
-        )
-        if isinstance(result, BaseModel):
-            last_usage = {"model": model, "input_tokens": None, "output_tokens": None}
-            return result.model_dump()
-        raise RuntimeError(f"with_structured_output 返回类型异常: {type(result)}")
-    except Exception as e:
-        print(f"[LLMClient] 结构化输出首次尝试失败，回退 json_mode: {type(e).__name__}: {e}")
+    cap_key = (url, model)
+    native_ok = _structured_native_ok.get(cap_key)
 
-    # 回退：json_mode + 提示词内嵌 schema
+    # 首次探测或已知可用：尝试原生结构化（DashScope 兼容模式对 qwen 系支持 tool calling）
+    if native_ok is not False:
+        try:
+            structured_llm = llm.bind(temperature=temperature).with_structured_output(schema)
+            result = structured_llm.invoke(
+                [
+                    ("system", system_content),
+                    ("human", human_content),
+                ]
+            )
+            if isinstance(result, BaseModel):
+                _structured_native_ok[cap_key] = True
+                last_usage = {"model": model, "input_tokens": None, "output_tokens": None}
+                return result.model_dump()
+            raise RuntimeError(f"with_structured_output 返回类型异常: {type(result)}")
+        except Exception as e:
+            if _is_unsupported_error(e):
+                # 网关明确不支持：记住结果，后续调用不再尝试原生路径
+                _structured_native_ok[cap_key] = False
+                print(f"[LLMClient] 网关不支持原生结构化输出，本次起固定走 json_mode 降级: {type(e).__name__}")
+            else:
+                # 瞬时错误（网络/超时等）：本次降级，但保留探测状态，下次再试原生
+                print(f"[LLMClient] 结构化输出原生路径异常（非能力问题），本次降级: {type(e).__name__}: {e}")
+
+    # 降级：json_mode + 提示词内嵌 schema
     schema_json = schema.model_json_schema()
     fallback_system = (
         f"{system_content}\n\n"

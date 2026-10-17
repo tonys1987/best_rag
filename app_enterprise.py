@@ -67,7 +67,14 @@ with st.sidebar:
             ok, fail = 0, 0
             prog = st.progress(0.0)
             for i, up in enumerate(uploads):
+                # 同名文件不再覆盖：追加时间戳后缀（report.pdf -> report_20261016_221830.pdf），
+                # 微秒精度循环兜底，同批同名文件也不会互相覆盖
                 dest = save_dir / up.name
+                if dest.exists():
+                    from datetime import datetime
+                    dest = save_dir / f"{dest.stem}_{datetime.now():%Y%m%d_%H%M%S}{dest.suffix}"
+                    while dest.exists():
+                        dest = save_dir / f"{dest.stem}_{datetime.now():%Y%m%d_%H%M%S%f}{dest.suffix}"
                 dest.write_bytes(up.getvalue())
                 try:
                     doc_store.ingest_file(dest)
@@ -118,6 +125,14 @@ with st.sidebar:
         st.caption(f"当前库内已有类型：{ '、'.join(ready_types) }")
     top_k = st.slider("返回相关块数量 Top-K", 1, 10, 5)
     use_rerank = st.checkbox("启用 LLM 重排（gte-rerank-v2）", value=True)
+    min_score = st.slider(
+        "相关度阈值 min_score（低于则拒答，0 为关闭）", 0.0, 0.8, 0.30, 0.05,
+        help="开重排按融合分过滤，否则按混合分过滤；实测无关问题 Top1 约 0.13-0.17",
+    )
+    bm25_weight = st.slider(
+        "混合检索：BM25 关键词权重（0=纯向量，1=纯BM25）", 0.0, 1.0, 0.30, 0.05,
+        help="向量擅长语义改写，BM25 擅长精确型号/专有名词/代码标识符",
+    )
 
     search_btn = st.button("🔎 搜索文档", use_container_width=True)
     answer_btn = st.button("🚀 生成答案", use_container_width=True, type="primary")
@@ -134,7 +149,7 @@ st.caption(f"知识库共 {qa.doc_count} 篇 ready 文档参与检索")
 def render_hits(hits: list):
     for i, h in enumerate(hits, start=1):
         loc = f"行{h['lines'][0]}-{h['lines'][1]}" if h.get("lines") else "全文"
-        score_txt = f"向量 {h['vector_score']}"
+        score_txt = f"混合 {h.get('hybrid_score', h['vector_score'])}（向量 {h['vector_score']} + BM25 {h.get('bm25_score', 0)}）"
         if "combined_score" in h:
             score_txt += f" ｜ 重排 {h.get('rerank_score')} ｜ 综合 {h['combined_score']}"
         with st.expander(f"结果 {i}：{h['file_name']}（{loc}） — {score_txt}"):
@@ -164,12 +179,13 @@ if search_btn and question.strip():
     with st.spinner("检索中..."):
         try:
             hits = qa.retrieve(question, top_k=top_k, file_type=file_type_arg,
-                               use_rerank=use_rerank)
+                               use_rerank=use_rerank, min_score=min_score,
+                               bm25_weight=bm25_weight)
         except ValueError as e:
             st.warning(str(e))
             hits = []
     if not hits:
-        st.info("没有检索到相关内容。")
+        st.info(f"没有检索到相关内容（相关度低于阈值 {min_score:.2f}）。可调低阈值或确认资料是否已入库。")
     else:
         st.caption(f"检索 {len(hits)} 块，耗时 {time.time() - t0:.2f}s" + ("（含 LLM 重排）" if use_rerank else "（未启用重排，按向量相似度排序）"))
         render_hits(hits)
@@ -180,16 +196,20 @@ if answer_btn and question.strip():
     with st.spinner("检索 + LLM 问答中，请稍候..." if not use_rerank else "检索 + 重排 + LLM 问答中，请稍候..."):
         try:
             ans = qa.ask(question, top_k=top_k, file_type=file_type_arg,
-                         use_rerank=use_rerank)
+                         use_rerank=use_rerank, min_score=min_score,
+                         bm25_weight=bm25_weight)
         except ValueError as e:
             st.warning(str(e))
             ans = None
     if ans is not None:
-        if ans.get("hits"):
-            st.markdown("**检索到的资料片段：**")
-            render_hits(ans["hits"])
-        st.markdown("<h3 style='margin-top: 16px;'>💡 问答结果</h3>", unsafe_allow_html=True)
-        render_answer(ans)
+        if ans.get("refused_by_threshold"):
+            st.warning(f"🚫 相关度不足，已拒答（阈值 {min_score:.2f}）：{ans['final_answer']}")
+        else:
+            if ans.get("hits"):
+                st.markdown("**检索到的资料片段：**")
+                render_hits(ans["hits"])
+            st.markdown("<h3 style='margin-top: 16px;'>💡 问答结果</h3>", unsafe_allow_html=True)
+            render_answer(ans)
 elif answer_btn:
     st.warning("请先输入问题")
 
